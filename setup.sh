@@ -59,6 +59,9 @@ if [ "${1:-}" = "--force" ] || [ "${1:-}" = "--no-cache" ]; then
     echo ""
 fi
 
+export PROJECT_DIR="${PROJECT_DIR:-.}"
+export GIT_PARENT_REPO="${GIT_PARENT_REPO:-${PROJECT_DIR}}"
+
 if "${COMPOSE_CMD[@]}" build $FORCE_REBUILD; then
     echo ""
     echo "======================================"
@@ -75,14 +78,12 @@ if "${COMPOSE_CMD[@]}" build $FORCE_REBUILD; then
     echo ""
     echo "Claude Code will start automatically with --dangerously-skip-permissions"
     echo ""
-    echo "💡 Tip: Create an alias for easier access:"
-    echo ""
-    echo "  echo \"alias claude='$(pwd)/claude-safe.sh'\" >> ~/.bashrc"
-    echo "  source ~/.bashrc"
-    echo ""
-    echo "Then just run 'claude' from any project directory!"
-    echo ""
     echo "For more info, see README.md"
+    echo ""
+    echo "Optional -- add an alias to ~/.bashrc:"
+    echo ""
+    echo "  echo \"alias claude-safe='$(pwd)/claude-safe.sh'\" >> ~/.bashrc"
+    echo "  source ~/.bashrc"
     echo ""
 else
     echo ""
