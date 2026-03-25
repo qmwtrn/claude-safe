@@ -182,6 +182,22 @@ echo "ANTHROPIC_API_KEY=your-key-here" >> .env
 ./claude-safe.sh
 ```
 
+### Persistent Environment Variables (Without Modifying Tracked Files)
+
+To inject secrets or environment variables without touching `docker-compose.yml` (which is checked into git), create a `docker-compose.override.yml` file in the `claude-safe` directory:
+
+```yaml
+services:
+  claude-code:
+    environment:
+      - MY_SECRET=value
+      - DATABASE_URL=postgres://user:pass@host/db
+```
+
+Docker Compose automatically merges this file with `docker-compose.yml`. Since `docker-compose.override.yml` is listed in `.gitignore`, it is never committed or pushed.
+
+Add any number of variables here. No rebuild required — changes take effect on the next `claude-safe.sh` run.
+
 ### Read-Only Project Mount
 
 Edit `docker-compose.yml`:
