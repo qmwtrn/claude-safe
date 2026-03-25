@@ -121,7 +121,14 @@ echo "⚡ Running with --dangerously-skip-permissions"
 echo ""
 
 # Run the container with Claude Code automatically starting
-"${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" run --rm claude-code
+# Build the list of compose files: always the base, plus override if present
+COMPOSE_FILES=(-f "$COMPOSE_FILE")
+OVERRIDE_FILE="$SCRIPT_DIR/docker-compose.override.yml"
+if [ -f "$OVERRIDE_FILE" ]; then
+    COMPOSE_FILES+=(-f "$OVERRIDE_FILE")
+fi
+
+"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm claude-code
 
 # Cleanup
 echo ""

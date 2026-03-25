@@ -25,9 +25,10 @@ services:
       - ${PROJECT_DIR:-.}:/workspace
       # For git worktrees: mount the parent repo (defaults to PROJECT_DIR when not set)
       - ${GIT_PARENT_REPO:-${PROJECT_DIR:-.}}:/git-parent-repo
-      # Import SSH keys and Claude auth from host without masking image content
+      # Import SSH keys, Claude auth, and git config from host without masking image content
       - ~/.ssh:/host-ssh:ro
       - ~/.claude:/host-claude:ro
+      - ~/.gitconfig:/host-gitconfig:ro
       # Persistent volumes for history and Claude config
       - claude-code-bashhistory:/commandhistory
       - claude-code-config:/home/node/.claude

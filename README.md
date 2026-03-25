@@ -107,6 +107,7 @@ paste                 # Paste from Windows clipboard
 - Network firewall restricts outbound connections to approved domains
 - Container runs as non-root user for additional security
 - Each run creates a fresh container that auto-deletes on exit (type `exit` or Ctrl+D to stop)
+- Git identity (`~/.gitconfig`) is synced from the host automatically on every start
 
 ## Using get-shit-done Workflows
 
@@ -184,19 +185,41 @@ echo "ANTHROPIC_API_KEY=your-key-here" >> .env
 
 ### Persistent Environment Variables (Without Modifying Tracked Files)
 
-To inject secrets or environment variables without touching `docker-compose.yml` (which is checked into git), create a `docker-compose.override.yml` file in the `claude-safe` directory:
+To inject secrets or environment variables without touching `docker-compose.yml` (which is checked into git), use two files that are both listed in `.gitignore` and never committed:
 
+**Step 1 — add the values to `.env`:**
+```bash
+MY_SECRET=value
+DATABASE_URL=postgres://user:pass@host/db
+AZURE_FEED_PAT=your-pat-here
+```
+
+**Step 2 — reference them in `docker-compose.override.yml`:**
 ```yaml
 services:
   claude-code:
     environment:
-      - MY_SECRET=value
-      - DATABASE_URL=postgres://user:pass@host/db
+      - MY_SECRET=${MY_SECRET:-}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - AZURE_FEED_PAT=${AZURE_FEED_PAT:-}
+      - AZ_FEED_PAT=${AZURE_FEED_PAT:-}
 ```
 
-Docker Compose automatically merges this file with `docker-compose.yml`. Since `docker-compose.override.yml` is listed in `.gitignore`, it is never committed or pushed.
+Docker Compose automatically merges `docker-compose.override.yml` with `docker-compose.yml`. Secrets stay in `.env`; the override file holds only structure. No rebuild required — changes take effect on the next `claude-safe.sh` run.
 
-Add any number of variables here. No rebuild required — changes take effect on the next `claude-safe.sh` run.
+### Azure DevOps HTTPS Authentication
+
+If your project uses Azure DevOps over HTTPS, git inside the container cannot use the host's `git-credential-manager` (it doesn't exist in the container). Instead, provide a Personal Access Token (PAT):
+
+1. Generate a PAT in Azure DevOps with **Code (Read & Write)** scope
+2. Add it to `.env`:
+   ```bash
+   AZURE_FEED_PAT=your-pat-here
+   AZ_FEED_PAT=your-pat-here
+   ```
+3. Expose it via `docker-compose.override.yml` (see above)
+
+On startup, `start-claude.sh` automatically installs a credential helper that serves this PAT for any `https://dev.azure.com` operation. No further configuration is needed.
 
 ### Read-Only Project Mount
 
@@ -284,6 +307,11 @@ PROJECT_DIR=/path/to/your/project
 
 # Optional: GSD default model - sonnet, opus, or haiku (default: sonnet)
 GSD_DEFAULT_MODEL=sonnet
+
+# Optional: Azure DevOps PAT for HTTPS git authentication
+# Required if your project uses Azure DevOps over HTTPS
+AZURE_FEED_PAT=
+AZ_FEED_PAT=
 ```
 
 ## Container Lifecycle
@@ -342,6 +370,23 @@ docker ps
 ```bash
 docker-compose down -v
 ```
+
+### Git Authentication Fails (credential-manager not found)
+
+If you see this error when Claude tries to push or fetch:
+
+```
+/usr/local/bin/git-credential-manager: not found
+fatal: could not read Password for 'https://...dev.azure.com/...'
+```
+
+Your host `~/.gitconfig` references `git-credential-manager`, which does not exist inside the container. Fix it by providing a PAT instead:
+
+1. Generate a PAT in Azure DevOps with **Code (Read & Write)** scope
+2. Add to `.env`: `AZURE_FEED_PAT=your-pat-here`
+3. Expose it in `docker-compose.override.yml` (see [Azure DevOps HTTPS Authentication](#azure-devops-https-authentication))
+
+The startup script will automatically configure a credential helper using the PAT.
 
 ### Firewall Blocking Required Site
 
