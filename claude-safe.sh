@@ -9,13 +9,6 @@ set -euo pipefail
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Use current directory if no project path is provided
-if [ $# -ge 1 ]; then
-    PROJECT_DIR="$1"
-elif [ -z "${PROJECT_DIR:-}" ] && [ -f "$SCRIPT_DIR/.env" ]; then
-    PROJECT_DIR=$(grep -E '^PROJECT_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
-fi
-PROJECT_DIR="${PROJECT_DIR:-.}"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
 # Choose Docker Compose (v1 or v2)
@@ -42,39 +35,82 @@ win_to_wsl_path() {
     echo "$p"
 }
 
-# Convert Windows paths to WSL format
-if [[ "$PROJECT_DIR" =~ ^[/\\][/\\] ]]; then
-    # UNC paths (\\server\share or //server/share)
-    unc_path="${PROJECT_DIR//\\//}"
-    # Extract server and share components
-    unc_path="${unc_path#//}"
-    server="${unc_path%%/*}"
-    rest="${unc_path#*/}"
-    if [[ "$server" == "wsl$" || "$server" == "wsl.localhost" ]]; then
-        # \\wsl$\distro\path or \\wsl.localhost\distro\path → extract the path after distro
-        if [[ "$rest" == */* ]]; then
-            PROJECT_DIR="/${rest#*/}"
+# Helper: normalize a single path — handles UNC, Windows drive letters, and resolves to absolute
+normalize_path() {
+    local p="$1"
+    if [[ "$p" =~ ^[/\\][/\\] ]]; then
+        local unc="${p//\\//}"
+        unc="${unc#//}"
+        local server="${unc%%/*}"
+        local rest="${unc#*/}"
+        if [[ "$server" == "wsl$" || "$server" == "wsl.localhost" ]]; then
+            p="${rest#*/}"
+            p="/${p}"
         else
-            PROJECT_DIR="/"
+            echo "❌ Error: UNC network paths (\\\\$server\\...) cannot be directly used in WSL" >&2
+            echo "   Mount the share first: sudo mount -t drvfs '$1' /mnt/share" >&2
+            return 1
         fi
     else
-        echo "❌ Error: UNC network paths (\\\\$server\\...) cannot be directly used in WSL"
-        echo "   Mount the share first: sudo mount -t drvfs '${PROJECT_DIR}' /mnt/share"
-        echo "   Then use: $0 /mnt/share"
-        exit 1
+        p=$(win_to_wsl_path "$p")
     fi
-else
-    PROJECT_DIR=$(win_to_wsl_path "$PROJECT_DIR")
-fi
+    if [ ! -d "$p" ]; then
+        echo "❌ Error: Directory not found: $p" >&2
+        return 1
+    fi
+    echo "$(cd "$p" && pwd)"
+}
 
-# Check if project directory exists
-if [ ! -d "$PROJECT_DIR" ]; then
-    echo "❌ Error: Directory not found: $PROJECT_DIR"
-    exit 1
-fi
+# Show usage information
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [PATH...]
 
-# Convert to absolute path
-PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+Run Claude Code in a sandboxed Docker container with network restrictions
+and --dangerously-skip-permissions enabled.
+
+Arguments:
+  PATH                  One or more project directories to mount.
+                        Multiple paths are mounted as named subdirectories
+                        under /workspace/<basename>. The first path becomes
+                        the working directory.
+                        Default: PROJECT_DIR from .env, or current directory.
+
+Options:
+  -h, --help            Show this help message and exit.
+
+Environment variables (set in .env or shell):
+  ANTHROPIC_API_KEY     API key for Claude. Leave empty to use web-based login.
+  PROJECT_DIR           Default project directory (overridden by PATH argument).
+  GIT_PARENT_REPO       Path to the parent git repository (auto-detected for
+                        worktrees, otherwise defaults to the primary PATH).
+
+Examples:
+  $(basename "$0")                        # use current directory
+  $(basename "$0") /path/to/repo          # single repo
+  $(basename "$0") /repo/a /repo/b        # multiple repos
+EOF
+}
+
+# Collect raw paths from arguments, .env, or default to current directory
+RAW_PATHS=()
+if [ $# -ge 1 ]; then
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+    esac
+    RAW_PATHS=("$@")
+elif [ -z "${PROJECT_DIR:-}" ] && [ -f "$SCRIPT_DIR/.env" ]; then
+    _env_dir=$(grep -E '^PROJECT_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    [ -n "$_env_dir" ] && RAW_PATHS+=("$_env_dir")
+fi
+[ "${#RAW_PATHS[@]}" -eq 0 ] && RAW_PATHS+=(".")
+
+# Resolve all paths
+RESOLVED_PATHS=()
+for _raw in "${RAW_PATHS[@]}"; do
+    _resolved=$(normalize_path "$_raw") || exit 1
+    RESOLVED_PATHS+=("$_resolved")
+done
 
 # Check if .env file exists, create empty one if not
 if [ ! -f "$SCRIPT_DIR/.env" ]; then
@@ -83,23 +119,36 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
     echo "ANTHROPIC_API_KEY=" >> "$SCRIPT_DIR/.env"
 fi
 
-# Export PROJECT_DIR for docker-compose
-export PROJECT_DIR
-
 # Ensure ~/.ssh and ~/.claude exist so Docker bind mounts don't create root-owned dirs
 mkdir -p -m 700 ~/.ssh
 mkdir -p ~/.claude
+
+# Single repo: existing behavior — mount at /workspace
+# Multiple repos: create an empty temp dir for /workspace, mount each repo as a named subdir
+EXTRA_VOLUME_FLAGS=()
+TEMP_WORKSPACE=""
+if [ "${#RESOLVED_PATHS[@]}" -eq 1 ]; then
+    export PROJECT_DIR="${RESOLVED_PATHS[0]}"
+else
+    TEMP_WORKSPACE=$(mktemp -d)
+    export PROJECT_DIR="$TEMP_WORKSPACE"
+    for _path in "${RESOLVED_PATHS[@]}"; do
+        _name=$(basename "$_path")
+        EXTRA_VOLUME_FLAGS+=(-v "$_path:/workspace/$_name")
+    done
+    export CLAUDE_WORKING_DIR="/workspace/$(basename "${RESOLVED_PATHS[0]}")"
+fi
 
 # Read GIT_PARENT_REPO from .env if not already in environment
 if [ -z "${GIT_PARENT_REPO:-}" ] && [ -f "$SCRIPT_DIR/.env" ]; then
     GIT_PARENT_REPO=$(grep -E '^GIT_PARENT_REPO=' "$SCRIPT_DIR/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
 fi
 
-# Auto-detect git worktrees if GIT_PARENT_REPO not set
-if [ -z "${GIT_PARENT_REPO:-}" ] && [ -f "$PROJECT_DIR/.git" ]; then
-    gitdir_content=$(cat "$PROJECT_DIR/.git")
+# Auto-detect git worktrees from the primary repo
+_primary="${RESOLVED_PATHS[0]}"
+if [ -z "${GIT_PARENT_REPO:-}" ] && [ -f "$_primary/.git" ]; then
+    gitdir_content=$(cat "$_primary/.git")
     gitdir_path="${gitdir_content#gitdir: }"
-    # Normalize backslashes to forward slashes for pattern matching
     gitdir_normalized="${gitdir_path//\\//}"
     if [[ "$gitdir_normalized" == */.git/worktrees/* ]]; then
         GIT_PARENT_REPO="${gitdir_normalized%%/.git/worktrees/*}"
@@ -107,16 +156,23 @@ if [ -z "${GIT_PARENT_REPO:-}" ] && [ -f "$PROJECT_DIR/.git" ]; then
     fi
 fi
 
-# Default GIT_PARENT_REPO to PROJECT_DIR so wrapper and direct compose usage behave the same
-GIT_PARENT_REPO="${GIT_PARENT_REPO:-$PROJECT_DIR}"
+GIT_PARENT_REPO="${GIT_PARENT_REPO:-$_primary}"
 GIT_PARENT_REPO=$(win_to_wsl_path "$GIT_PARENT_REPO")
 export GIT_PARENT_REPO
-if [ "$GIT_PARENT_REPO" != "$PROJECT_DIR" ]; then
+if [ "$GIT_PARENT_REPO" != "$_primary" ]; then
     echo "📂 Parent repo mount: $GIT_PARENT_REPO"
 fi
 
 echo "🐳 Starting Claude Code..."
-echo "📁 Project: $PROJECT_DIR"
+if [ "${#RESOLVED_PATHS[@]}" -eq 1 ]; then
+    echo "📁 Project: ${RESOLVED_PATHS[0]}"
+else
+    echo "📁 Repos:"
+    for _path in "${RESOLVED_PATHS[@]}"; do
+        echo "   /workspace/$(basename "$_path")  ←  $_path"
+    done
+    echo "   Starting in: /workspace/$(basename "${RESOLVED_PATHS[0]}")"
+fi
 echo "⚡ Running with --dangerously-skip-permissions"
 echo ""
 
@@ -128,8 +184,9 @@ if [ -f "$OVERRIDE_FILE" ]; then
     COMPOSE_FILES+=(-f "$OVERRIDE_FILE")
 fi
 
-"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm claude-code
+"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" claude-code
 
 # Cleanup
+[ -n "$TEMP_WORKSPACE" ] && rm -rf "$TEMP_WORKSPACE"
 echo ""
 echo "✅ Claude Code session ended"

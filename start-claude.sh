@@ -207,5 +207,10 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     fi
 fi
 
+# Change to the designated working directory.
+# In multi-repo mode claude-safe.sh sets CLAUDE_WORKING_DIR to the first repo;
+# in single-repo mode /workspace is the repo, so we fall back to that.
+cd "${CLAUDE_WORKING_DIR:-/workspace}"
+
 # Start Claude Code
 exec claude --dangerously-skip-permissions
