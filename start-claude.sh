@@ -75,20 +75,30 @@ setup_git_credentials() {
     # not error out.
     git config --global credential.helper ""
 
-    # Azure DevOps: use GIT_ASKPASS for non-interactive password auth.
-    # GIT_ASKPASS is called by git with the prompt as $1 and must print the
-    # secret to stdout. Since the remote URL already embeds the username,
-    # git only calls this for the password — so echoing the PAT is sufficient.
-    # The script reads AZURE_FEED_PAT from the environment at call time.
-    if [ -n "${AZURE_FEED_PAT:-}" ]; then
-        local askpass="/tmp/git-askpass-azpat"
+    # Configure a single GIT_ASKPASS script that dispatches by host when one
+    # or both of GH_TOKEN / AZURE_FEED_PAT are set.
+    # GIT_ASKPASS is called by git with the prompt string as $1 and must print
+    # the secret to stdout.
+    # GitHub remotes use "x-access-token" as a fixed username in the URL so
+    # git only calls this script for the password.
+    # Azure DevOps remotes also embed the username in the URL.
+    if [ -n "${GH_TOKEN:-}" ] || [ -n "${AZURE_FEED_PAT:-}" ]; then
+        local askpass="/tmp/git-askpass"
         cat > "$askpass" << 'ASKPASS_EOF'
 #!/bin/sh
-echo "$AZURE_FEED_PAT"
+case "$1" in
+    *github.com*)
+        echo "$GH_TOKEN"
+        ;;
+    *dev.azure.com*|*visualstudio.com*)
+        echo "$AZURE_FEED_PAT"
+        ;;
+esac
 ASKPASS_EOF
         chmod +x "$askpass"
         export GIT_ASKPASS="$askpass"
-        echo "✅ Azure DevOps PAT authentication configured (GIT_ASKPASS)"
+        [ -n "${GH_TOKEN:-}" ]        && echo "GitHub token authentication configured (GIT_ASKPASS)"
+        [ -n "${AZURE_FEED_PAT:-}" ]  && echo "Azure DevOps PAT authentication configured (GIT_ASKPASS)"
     fi
 }
 
