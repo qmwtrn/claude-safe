@@ -83,7 +83,8 @@ Options:
                         do not want the container to be able to open windows
                         on your desktop. By default, the X11 socket is shared
                         so that /login inside the container can open your
-                        browser automatically.
+                        browser automatically. DISPLAY defaults to :0 when
+                        not set in the environment.
 
 Environment variables (set in .env or shell):
   ANTHROPIC_API_KEY     API key for Claude. Leave empty to use web-based login.
@@ -175,23 +176,6 @@ if [ "$GIT_PARENT_REPO" != "$_primary" ]; then
     echo "📂 Parent repo mount: $GIT_PARENT_REPO"
 fi
 
-# Grant container access to host X11 display so /login can open the browser.
-# Skipped when --no-browser is set or DISPLAY is not available.
-X11_VOLUME_FLAGS=()
-if [ "$NO_BROWSER" = true ]; then
-    echo "X11 display sharing disabled (--no-browser)."
-elif [ -z "${DISPLAY:-}" ]; then
-    echo "Warning: DISPLAY is not set — skipping X11 display sharing."
-    echo "         /login inside the container will not be able to open a browser."
-else
-    echo "Granting container access to the host X11 display ($DISPLAY)."
-    echo "This allows /login inside the container to open your browser."
-    echo "Run 'xhost -local:docker' to revoke after the session if desired."
-    xhost +local:docker > /dev/null
-    X11_VOLUME_FLAGS=(-v /tmp/.X11-unix:/tmp/.X11-unix)
-fi
-echo ""
-
 echo "🐳 Starting Claude Code..."
 if [ "${#RESOLVED_PATHS[@]}" -eq 1 ]; then
     echo "📁 Project: ${RESOLVED_PATHS[0]}"
@@ -213,8 +197,17 @@ if [ -f "$OVERRIDE_FILE" ]; then
     COMPOSE_FILES+=(-f "$OVERRIDE_FILE")
 fi
 
+# Grant container access to host X11 display so /login can open the browser.
+# When DISPLAY is unset and --no-browser is not given, default to :0.
+X11_VOLUME_FLAGS=()
 DISPLAY_FLAGS=()
-[ -n "${DISPLAY:-}" ] && [ "$NO_BROWSER" = false ] && DISPLAY_FLAGS=(-e DISPLAY="$DISPLAY")
+if [ "$NO_BROWSER" = false ]; then
+    : "${DISPLAY:=:0}"
+    xhost +local:docker > /dev/null 2>&1 \
+        && X11_VOLUME_FLAGS=(-v /tmp/.X11-unix:/tmp/.X11-unix) \
+        && DISPLAY_FLAGS=(-e DISPLAY="$DISPLAY") \
+        && echo "X11 display sharing enabled ($DISPLAY) — /login will open your browser."
+fi
 
 "${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" "${X11_VOLUME_FLAGS[@]}" "${DISPLAY_FLAGS[@]}" claude-code
 
