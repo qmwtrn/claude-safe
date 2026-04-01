@@ -222,5 +222,8 @@ fi
 # in single-repo mode /workspace is the repo, so we fall back to that.
 cd "${CLAUDE_WORKING_DIR:-/workspace}"
 
+# Inform the user if X11 display sharing is active
+[ -n "${DISPLAY:-}" ] && echo "X11 display sharing enabled ($DISPLAY) — /login will open your browser."
+
 # Start Claude Code
 exec claude --dangerously-skip-permissions

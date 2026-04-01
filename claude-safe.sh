@@ -203,10 +203,10 @@ X11_VOLUME_FLAGS=()
 DISPLAY_FLAGS=()
 if [ "$NO_BROWSER" = false ]; then
     : "${DISPLAY:=:0}"
-    xhost +local:docker > /dev/null 2>&1 \
-        && X11_VOLUME_FLAGS=(-v /tmp/.X11-unix:/tmp/.X11-unix) \
-        && DISPLAY_FLAGS=(-e DISPLAY="$DISPLAY") \
-        && echo "X11 display sharing enabled ($DISPLAY) — /login will open your browser."
+    if xhost +local:docker > /dev/null 2>&1; then
+        X11_VOLUME_FLAGS=(-v /tmp/.X11-unix:/tmp/.X11-unix)
+        DISPLAY_FLAGS=(-e DISPLAY="$DISPLAY")
+    fi
 fi
 
 "${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" "${X11_VOLUME_FLAGS[@]}" "${DISPLAY_FLAGS[@]}" claude-code
