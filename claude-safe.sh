@@ -78,6 +78,12 @@ Arguments:
 
 Options:
   -h, --help            Show this help message and exit.
+  --no-browser          Do not grant the container access to the host X11
+                        display. Use this when running headless or when you
+                        do not want the container to be able to open windows
+                        on your desktop. By default, the X11 socket is shared
+                        so that /login inside the container can open your
+                        browser automatically.
 
 Environment variables (set in .env or shell):
   ANTHROPIC_API_KEY     API key for Claude. Leave empty to use web-based login.
@@ -89,17 +95,23 @@ Examples:
   $(basename "$0")                        # use current directory
   $(basename "$0") /path/to/repo          # single repo
   $(basename "$0") /repo/a /repo/b        # multiple repos
+  $(basename "$0") --no-browser /path/to/repo   # skip X11 display sharing
 EOF
 }
 
 # Collect raw paths from arguments, .env, or default to current directory
+NO_BROWSER=false
 RAW_PATHS=()
 if [ $# -ge 1 ]; then
-    case "$1" in
-        -h|--help) usage; exit 0 ;;
-    esac
-    RAW_PATHS=("$@")
-elif [ -z "${PROJECT_DIR:-}" ] && [ -f "$SCRIPT_DIR/.env" ]; then
+    for _arg in "$@"; do
+        case "$_arg" in
+            -h|--help) usage; exit 0 ;;
+            --no-browser) NO_BROWSER=true ;;
+            *) RAW_PATHS+=("$_arg") ;;
+        esac
+    done
+fi
+if [ "${#RAW_PATHS[@]}" -eq 0 ] && [ -z "${PROJECT_DIR:-}" ] && [ -f "$SCRIPT_DIR/.env" ]; then
     _env_dir=$(grep -E '^PROJECT_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
     [ -n "$_env_dir" ] && RAW_PATHS+=("$_env_dir")
 fi
@@ -163,6 +175,23 @@ if [ "$GIT_PARENT_REPO" != "$_primary" ]; then
     echo "📂 Parent repo mount: $GIT_PARENT_REPO"
 fi
 
+# Grant container access to host X11 display so /login can open the browser.
+# Skipped when --no-browser is set or DISPLAY is not available.
+X11_VOLUME_FLAGS=()
+if [ "$NO_BROWSER" = true ]; then
+    echo "X11 display sharing disabled (--no-browser)."
+elif [ -z "${DISPLAY:-}" ]; then
+    echo "Warning: DISPLAY is not set — skipping X11 display sharing."
+    echo "         /login inside the container will not be able to open a browser."
+else
+    echo "Granting container access to the host X11 display ($DISPLAY)."
+    echo "This allows /login inside the container to open your browser."
+    echo "Run 'xhost -local:docker' to revoke after the session if desired."
+    xhost +local:docker > /dev/null
+    X11_VOLUME_FLAGS=(-v /tmp/.X11-unix:/tmp/.X11-unix)
+fi
+echo ""
+
 echo "🐳 Starting Claude Code..."
 if [ "${#RESOLVED_PATHS[@]}" -eq 1 ]; then
     echo "📁 Project: ${RESOLVED_PATHS[0]}"
@@ -184,7 +213,10 @@ if [ -f "$OVERRIDE_FILE" ]; then
     COMPOSE_FILES+=(-f "$OVERRIDE_FILE")
 fi
 
-"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" claude-code
+DISPLAY_FLAGS=()
+[ -n "${DISPLAY:-}" ] && [ "$NO_BROWSER" = false ] && DISPLAY_FLAGS=(-e DISPLAY="$DISPLAY")
+
+"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" "${X11_VOLUME_FLAGS[@]}" "${DISPLAY_FLAGS[@]}" claude-code
 
 # Cleanup
 [ -n "$TEMP_WORKSPACE" ] && rm -rf "$TEMP_WORKSPACE"
