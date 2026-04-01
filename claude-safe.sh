@@ -229,9 +229,13 @@ if [ "$NO_BROWSER" = false ]; then
 
     # Write the listener to a temp file to avoid HEREDOC-in-subshell PID issues.
     # The listener validates that URLs start with https:// before calling xdg-open.
+    # For OAuth authorization URLs it also starts a TCP proxy on localhost:<port>
+    # that uses docker exec curl to relay the browser's callback request into the
+    # container's loopback — the OAuth server listens on 127.0.0.1:<random_port>
+    # which is unreachable from the host via port mapping on a bridge network.
     # It loops indefinitely and exits only when killed via the cleanup trap.
     cat > "$_listener_script" << PYEOF
-import socket, subprocess, os, sys
+import socket, subprocess, os, sys, re, threading, urllib.parse
 
 socket_path = "$_browser_socket"
 sentinel_path = "$_sentinel"
@@ -247,12 +251,112 @@ sock.listen(5)
 # Signal readiness to the shell by creating the sentinel file.
 open(sentinel_path, 'w').close()
 
+def find_container():
+    """Find the running claude-code container name via docker ps label filter."""
+    try:
+        result = subprocess.run(
+            ['docker', 'ps',
+             '--filter', 'label=com.docker.compose.service=claude-code',
+             '--filter', 'status=running',
+             '--format', '{{.Names}}'],
+            capture_output=True, text=True, timeout=5
+        )
+        name = result.stdout.strip().splitlines()[0] if result.stdout.strip() else None
+        return name
+    except Exception:
+        return None
+
+def start_oauth_proxy(port):
+    """
+    Start a TCP proxy on localhost:<port> that relays HTTP requests to the
+    container's OAuth callback server (127.0.0.1:<port> inside the container)
+    via docker exec curl. Handles multiple requests (callback + redirect to /).
+    --http1.0 prevents chunked Transfer-Encoding so the response is safe to
+    forward verbatim to the browser.
+    """
+    try:
+        proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        proxy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        proxy.bind(('127.0.0.1', port))
+        proxy.listen(5)
+        proxy.settimeout(120)
+    except OSError as e:
+        sys.stderr.write(f"OAuth proxy: cannot bind port {port}: {e}\n")
+        return
+
+    def handle_conn(conn):
+        try:
+            conn.settimeout(10)
+            raw = b''
+            while b'\r\n\r\n' not in raw:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                raw += chunk
+            first_line = raw.split(b'\r\n')[0].decode('utf-8', errors='ignore')
+            m = re.match(r'\w+ (/[^\s]*)', first_line)
+            if m:
+                path = m.group(1)
+                container = find_container()
+                if container:
+                    result = subprocess.run(
+                        ['docker', 'exec', container,
+                         'curl', '-s', '-i', '--http1.0',
+                         f'http://127.0.0.1:{port}{path}'],
+                        capture_output=True, timeout=15
+                    )
+                    if result.returncode == 0:
+                        conn.sendall(result.stdout)
+                    else:
+                        conn.sendall(b'HTTP/1.1 502 Bad Gateway\r\n\r\nRelay error')
+                else:
+                    conn.sendall(b'HTTP/1.1 503 Service Unavailable\r\n\r\nContainer not found')
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def serve():
+        try:
+            while True:
+                try:
+                    c, _ = proxy.accept()
+                    threading.Thread(target=handle_conn, args=(c,), daemon=True).start()
+                except socket.timeout:
+                    break
+                except OSError:
+                    break
+        finally:
+            proxy.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+
+def extract_oauth_port(url):
+    """Extract the callback port from an OAuth authorization URL redirect_uri."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed.query)
+        redirect_uris = params.get('redirect_uri', [])
+        for ruri in redirect_uris:
+            rp = urllib.parse.urlparse(ruri)
+            if rp.scheme == 'http' and rp.hostname == 'localhost' and rp.port:
+                return rp.port
+    except Exception:
+        pass
+    return None
+
 try:
     while True:
         conn, _ = sock.accept()
         try:
             data = conn.recv(2048).decode('utf-8', errors='ignore').strip()
             if data.startswith('https://'):
+                port = extract_oauth_port(data)
+                if port:
+                    start_oauth_proxy(port)
                 subprocess.Popen(['xdg-open', data],
                                  stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)
