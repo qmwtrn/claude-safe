@@ -197,19 +197,35 @@ if [ -f "$OVERRIDE_FILE" ]; then
     COMPOSE_FILES+=(-f "$OVERRIDE_FILE")
 fi
 
-# Grant container access to host X11 display so /login can open the browser.
+# Grant container access to the host X11 display and D-Bus session bus so
+# /login inside the container can open the host browser automatically.
+# D-Bus portal (org.freedesktop.portal.OpenURI) is the correct mechanism:
+# xdg-open in the container calls it, and the host desktop opens the browser.
+# X11 socket sharing is kept alongside D-Bus as it is needed for xdg-open
+# to identify the desktop session type.
 # When DISPLAY is unset and --no-browser is not given, default to :0.
 X11_VOLUME_FLAGS=()
+DBUS_VOLUME_FLAGS=()
 DISPLAY_FLAGS=()
+DBUS_FLAGS=()
 if [ "$NO_BROWSER" = false ]; then
     : "${DISPLAY:=:0}"
     if xhost +local:docker > /dev/null 2>&1; then
         X11_VOLUME_FLAGS=(-v /tmp/.X11-unix:/tmp/.X11-unix)
         DISPLAY_FLAGS=(-e DISPLAY="$DISPLAY")
     fi
+    _host_uid=$(id -u)
+    _bus_socket="/run/user/${_host_uid}/bus"
+    if [ -S "$_bus_socket" ]; then
+        DBUS_VOLUME_FLAGS=(-v "${_bus_socket}:${_bus_socket}")
+        DBUS_FLAGS=(-e DBUS_SESSION_BUS_ADDRESS="unix:path=${_bus_socket}")
+    else
+        echo "Warning: D-Bus session socket not found at ${_bus_socket}."
+        echo "         /login will not be able to open the browser automatically."
+    fi
 fi
 
-"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" "${X11_VOLUME_FLAGS[@]}" "${DISPLAY_FLAGS[@]}" claude-code
+"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" "${X11_VOLUME_FLAGS[@]}" "${DBUS_VOLUME_FLAGS[@]}" "${DISPLAY_FLAGS[@]}" "${DBUS_FLAGS[@]}" claude-code
 
 # Cleanup
 [ -n "$TEMP_WORKSPACE" ] && rm -rf "$TEMP_WORKSPACE"

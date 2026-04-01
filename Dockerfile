@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   vim \
   xclip \
   xsel \
+  xdg-utils \
   expect \
   python3-pip \
   pipx \
