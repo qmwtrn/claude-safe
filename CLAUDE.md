@@ -61,6 +61,15 @@ Hooks: trailing-whitespace, end-of-file-fixer, check-yaml, check-added-large-fil
 - SonarCloud PR minimum: 80% coverage
 - PEP 8 (Python style guide) (Python Enhancement Proposals)
 
+## Custom Commands  <!-- omit in toc -->
+
+When the user invokes a slash command (e.g. `/critic`), first check `.claude/commands/<command>.md` before using the Skill tool.
+
+## Commit Messages  <!-- omit in toc -->
+
+- Never include "Co-Authored-By" lines in commit messages.
+- Always set `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` to the user's local time when committing: `GIT_AUTHOR_DATE="$(TZ=Europe/Zurich date -R)" GIT_COMMITTER_DATE="$(TZ=Europe/Zurich date -R)" git commit -m "..."`
+
 ## Branch Naming  <!-- omit in toc -->
 
 - Features: `feature/<initials>/<name>`

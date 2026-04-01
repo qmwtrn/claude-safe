@@ -222,8 +222,24 @@ fi
 # in single-repo mode /workspace is the repo, so we fall back to that.
 cd "${CLAUDE_WORKING_DIR:-/workspace}"
 
-# Inform the user if browser auto-open is active (X11 + D-Bus portal)
-[ -n "${DISPLAY:-}" ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && echo "Browser auto-open enabled — /login will open your browser."
+# Set up browser opener via Unix socket relay when available.
+# The wrapper sends the URL to the host listener which calls xdg-open there,
+# bypassing AppArmor restrictions on D-Bus access from the container.
+if [ -n "${CLAUDE_BROWSER_SOCKET:-}" ] && [ -S "${CLAUDE_BROWSER_SOCKET}" ]; then
+    cat > /tmp/browser-open.sh << 'BROWSER_WRAPPER_EOF'
+#!/bin/sh
+python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect('$CLAUDE_BROWSER_SOCKET')
+s.sendall(sys.argv[1].encode())
+s.close()
+" "$1"
+BROWSER_WRAPPER_EOF
+    chmod 0700 /tmp/browser-open.sh
+    export BROWSER=/tmp/browser-open.sh
+    echo "Browser auto-open enabled — /login will open your browser."
+fi
 
 # Start Claude Code
 exec claude --dangerously-skip-permissions

@@ -197,37 +197,99 @@ if [ -f "$OVERRIDE_FILE" ]; then
     COMPOSE_FILES+=(-f "$OVERRIDE_FILE")
 fi
 
-# Grant container access to the host X11 display and D-Bus session bus so
-# /login inside the container can open the host browser automatically.
-# D-Bus portal (org.freedesktop.portal.OpenURI) is the correct mechanism:
-# xdg-open in the container calls it, and the host desktop opens the browser.
-# X11 socket sharing is kept alongside D-Bus as it is needed for xdg-open
-# to identify the desktop session type.
+# Open host browser from the container via a Unix socket relay.
+# AppArmor (docker-default profile) blocks D-Bus from the container, so
+# xdg-open is called on the HOST side by a Python listener started here.
+# The container sends URLs over a bind-mounted Unix socket. The listener
+# validates the URL scheme before passing it to xdg-open.
 # When DISPLAY is unset and --no-browser is not given, default to :0.
 X11_VOLUME_FLAGS=()
-DBUS_VOLUME_FLAGS=()
+BROWSER_SOCKET_FLAGS=()
 DISPLAY_FLAGS=()
-DBUS_FLAGS=()
+_listener_pid=""
+_browser_socket=""
+_listener_script=""
+
+cleanup_browser() {
+    [ -n "$_listener_pid" ] && kill "$_listener_pid" 2>/dev/null || true
+    [ -n "$_browser_socket" ] && rm -f "$_browser_socket" 2>/dev/null || true
+    [ -n "$_listener_script" ] && rm -f "$_listener_script" 2>/dev/null || true
+}
+
 if [ "$NO_BROWSER" = false ]; then
     : "${DISPLAY:=:0}"
     if xhost +local:docker > /dev/null 2>&1; then
         X11_VOLUME_FLAGS=(-v /tmp/.X11-unix:/tmp/.X11-unix)
         DISPLAY_FLAGS=(-e DISPLAY="$DISPLAY")
     fi
-    _host_uid=$(id -u)
-    _bus_socket="/run/user/${_host_uid}/bus"
-    if [ -S "$_bus_socket" ]; then
-        DBUS_VOLUME_FLAGS=(-v "${_bus_socket}:${_bus_socket}")
-        DBUS_FLAGS=(-e DBUS_SESSION_BUS_ADDRESS="unix:path=${_bus_socket}")
-    else
-        echo "Warning: D-Bus session socket not found at ${_bus_socket}."
-        echo "         /login will not be able to open the browser automatically."
-    fi
+
+    _browser_socket=$(mktemp -u /tmp/claude-browser-XXXXXX.sock)
+    _listener_script=$(mktemp /tmp/claude-browser-listener-XXXXXX.py)
+    _sentinel="${_browser_socket}.ready"
+
+    # Write the listener to a temp file to avoid HEREDOC-in-subshell PID issues.
+    # The listener validates that URLs start with https:// before calling xdg-open.
+    # It loops indefinitely and exits only when killed via the cleanup trap.
+    cat > "$_listener_script" << PYEOF
+import socket, subprocess, os, sys
+
+socket_path = "$_browser_socket"
+sentinel_path = "$_sentinel"
+
+if os.path.exists(socket_path):
+    os.remove(socket_path)
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.bind(socket_path)
+os.chmod(socket_path, 0o700)
+sock.listen(5)
+
+# Signal readiness to the shell by creating the sentinel file.
+open(sentinel_path, 'w').close()
+
+try:
+    while True:
+        conn, _ = sock.accept()
+        try:
+            data = conn.recv(2048).decode('utf-8', errors='ignore').strip()
+            if data.startswith('https://'):
+                subprocess.Popen(['xdg-open', data],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        finally:
+            conn.close()
+except Exception:
+    pass
+finally:
+    sock.close()
+    for p in (socket_path, sentinel_path):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+PYEOF
+
+    # Start the listener as a direct background job so $! is the real PID.
+    python3 "$_listener_script" &
+    _listener_pid=$!
+    trap 'cleanup_browser' EXIT
+
+    # Wait for the listener to bind before starting the container.
+    _wait=0
+    while [ ! -f "$_sentinel" ] && [ $_wait -lt 50 ]; do
+        sleep 0.1
+        _wait=$(( _wait + 1 ))
+    done
+    rm -f "$_sentinel"
+
+    BROWSER_SOCKET_FLAGS=(-v "${_browser_socket}:${_browser_socket}" \
+                          -e CLAUDE_BROWSER_SOCKET="${_browser_socket}")
 fi
 
-"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" "${X11_VOLUME_FLAGS[@]}" "${DBUS_VOLUME_FLAGS[@]}" "${DISPLAY_FLAGS[@]}" "${DBUS_FLAGS[@]}" claude-code
+"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" run --rm "${EXTRA_VOLUME_FLAGS[@]}" "${X11_VOLUME_FLAGS[@]}" "${BROWSER_SOCKET_FLAGS[@]}" "${DISPLAY_FLAGS[@]}" claude-code
 
 # Cleanup
+cleanup_browser
 [ -n "$TEMP_WORKSPACE" ] && rm -rf "$TEMP_WORKSPACE"
 echo ""
-echo "✅ Claude Code session ended"
+echo "Claude Code session ended"
