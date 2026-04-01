@@ -289,8 +289,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 opener = urllib.request.build_opener(NoRedirect)
 try:
+    # Use 'localhost' not '127.0.0.1': Node.js binds to ::1 (IPv6) when given
+    # 'localhost', so connecting via 127.0.0.1 (IPv4) gets ECONNREFUSED.
     resp = opener.open(
-        f'http://127.0.0.1:{port}{callback_path}',
+        f'http://localhost:{port}{callback_path}',
         timeout=15
     )
     status = resp.status
