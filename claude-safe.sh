@@ -228,12 +228,21 @@ if [ "$NO_BROWSER" = false ]; then
     _sentinel="${_browser_socket}.ready"
 
     # Write the listener to a temp file to avoid HEREDOC-in-subshell PID issues.
-    # The listener validates that URLs start with https:// before calling xdg-open.
-    # For OAuth authorization URLs it also starts a TCP proxy on localhost:<port>
-    # that uses docker exec curl to relay the browser's callback request into the
-    # container's loopback — the OAuth server listens on 127.0.0.1:<random_port>
-    # which is unreachable from the host via port mapping on a bridge network.
-    # It loops indefinitely and exits only when killed via the cleanup trap.
+    #
+    # OAuth callback relay — no docker exec, no privilege escalation:
+    #
+    # When the container sends an OAuth authorization URL the wrapper holds
+    # the Unix socket connection open. The host:
+    #   1. Extracts the callback port from redirect_uri
+    #   2. Starts a TCP proxy on localhost:<port>
+    #   3. Calls xdg-open to open the browser
+    #   4. When Firefox hits the proxy with /callback?code=..., the host sends
+    #      that path back over the still-open Unix socket to the container
+    #   5. The container makes the final GET to its own 127.0.0.1:<port><path>
+    #      and writes the HTTP response back over the socket
+    #   6. The host forwards that response to Firefox
+    #
+    # This avoids docker exec (requires docker group) and docker socket access.
     cat > "$_listener_script" << PYEOF
 import socket, subprocess, os, sys, re, threading, urllib.parse
 
@@ -251,96 +260,19 @@ sock.listen(5)
 # Signal readiness to the shell by creating the sentinel file.
 open(sentinel_path, 'w').close()
 
-def find_container():
-    """Find the running claude-code container name via docker ps label filter."""
-    try:
-        result = subprocess.run(
-            ['docker', 'ps',
-             '--filter', 'label=com.docker.compose.service=claude-code',
-             '--filter', 'status=running',
-             '--format', '{{.Names}}'],
-            capture_output=True, text=True, timeout=5
-        )
-        name = result.stdout.strip().splitlines()[0] if result.stdout.strip() else None
-        return name
-    except Exception:
-        return None
-
-def start_oauth_proxy(port):
-    """
-    Start a TCP proxy on localhost:<port> that relays HTTP requests to the
-    container's OAuth callback server (127.0.0.1:<port> inside the container)
-    via docker exec curl. Handles multiple requests (callback + redirect to /).
-    --http1.0 prevents chunked Transfer-Encoding so the response is safe to
-    forward verbatim to the browser.
-    """
-    try:
-        proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        proxy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        proxy.bind(('127.0.0.1', port))
-        proxy.listen(5)
-        proxy.settimeout(120)
-    except OSError as e:
-        sys.stderr.write(f"OAuth proxy: cannot bind port {port}: {e}\n")
-        return
-
-    def handle_conn(conn):
-        try:
-            conn.settimeout(10)
-            raw = b''
-            while b'\r\n\r\n' not in raw:
-                chunk = conn.recv(4096)
-                if not chunk:
-                    break
-                raw += chunk
-            first_line = raw.split(b'\r\n')[0].decode('utf-8', errors='ignore')
-            m = re.match(r'\w+ (/[^\s]*)', first_line)
-            if m:
-                path = m.group(1)
-                container = find_container()
-                if container:
-                    result = subprocess.run(
-                        ['docker', 'exec', container,
-                         'curl', '-s', '-i', '--http1.0',
-                         f'http://127.0.0.1:{port}{path}'],
-                        capture_output=True, timeout=15
-                    )
-                    if result.returncode == 0:
-                        conn.sendall(result.stdout)
-                    else:
-                        conn.sendall(b'HTTP/1.1 502 Bad Gateway\r\n\r\nRelay error')
-                else:
-                    conn.sendall(b'HTTP/1.1 503 Service Unavailable\r\n\r\nContainer not found')
-        except Exception:
-            pass
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-    def serve():
-        try:
-            while True:
-                try:
-                    c, _ = proxy.accept()
-                    threading.Thread(target=handle_conn, args=(c,), daemon=True).start()
-                except socket.timeout:
-                    break
-                except OSError:
-                    break
-        finally:
-            proxy.close()
-
-    threading.Thread(target=serve, daemon=True).start()
+# Map oauth port -> open container socket connection.
+# Protected by a lock because the proxy thread and the main accept loop
+# access it concurrently.
+import threading
+pending = {}
+pending_lock = threading.Lock()
 
 def extract_oauth_port(url):
-    """Extract the callback port from an OAuth authorization URL redirect_uri."""
+    """Extract callback port from redirect_uri parameter in OAuth URL."""
     try:
         parsed = urllib.parse.urlparse(url)
         params = urllib.parse.parse_qs(parsed.query)
-        redirect_uris = params.get('redirect_uri', [])
-        for ruri in redirect_uris:
+        for ruri in params.get('redirect_uri', []):
             rp = urllib.parse.urlparse(ruri)
             if rp.scheme == 'http' and rp.hostname == 'localhost' and rp.port:
                 return rp.port
@@ -348,20 +280,128 @@ def extract_oauth_port(url):
         pass
     return None
 
+def start_oauth_proxy(port, container_conn):
+    """
+    Bind a TCP proxy on localhost:<port>. When Firefox delivers the callback
+    request, extract the path and send it to the container over container_conn.
+    Wait for the container to reply with the HTTP response, then forward it
+    to Firefox. The container makes the actual request to its own loopback.
+    """
+    try:
+        proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        proxy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        proxy.bind(('127.0.0.1', port))
+        proxy.listen(5)
+        proxy.settimeout(300)
+    except OSError as e:
+        sys.stderr.write(f"OAuth proxy: cannot bind port {port}: {e}\n")
+        return
+
+    def serve():
+        try:
+            while True:
+                try:
+                    browser_conn, _ = proxy.accept()
+                except socket.timeout:
+                    break
+                except OSError:
+                    break
+
+                try:
+                    browser_conn.settimeout(15)
+                    raw = b''
+                    while b'\r\n\r\n' not in raw and len(raw) < 8192:
+                        chunk = browser_conn.recv(4096)
+                        if not chunk:
+                            break
+                        raw += chunk
+                    first_line = raw.split(b'\r\n')[0].decode('utf-8', errors='ignore')
+                    m = re.match(r'\w+ (/[^\s]*)', first_line)
+                    if not m:
+                        browser_conn.sendall(b'HTTP/1.1 400 Bad Request\r\n\r\n')
+                        browser_conn.close()
+                        continue
+
+                    path = m.group(1)
+                    # Only relay /callback paths and bare /
+                    if not re.match(r'^(/callback(\?|$)|/$)', path):
+                        browser_conn.sendall(b'HTTP/1.1 403 Forbidden\r\n\r\n')
+                        browser_conn.close()
+                        continue
+
+                    with pending_lock:
+                        conn = pending.get(port)
+
+                    if conn is None:
+                        browser_conn.sendall(b'HTTP/1.1 503 Service Unavailable\r\n\r\nNo container connection')
+                        browser_conn.close()
+                        continue
+
+                    try:
+                        # Send path to container, delimited by newline.
+                        conn.sendall((path + '\n').encode())
+                        # Read HTTP response from container until it closes its end.
+                        response = b''
+                        conn.settimeout(15)
+                        while True:
+                            chunk = conn.recv(4096)
+                            if not chunk:
+                                break
+                            response += chunk
+                        browser_conn.sendall(response if response else
+                            b'HTTP/1.1 502 Bad Gateway\r\n\r\nEmpty response from container')
+                    except Exception:
+                        browser_conn.sendall(b'HTTP/1.1 502 Bad Gateway\r\n\r\nRelay error')
+                    finally:
+                        browser_conn.close()
+                        with pending_lock:
+                            pending.pop(port, None)
+
+                except Exception:
+                    try:
+                        browser_conn.close()
+                    except Exception:
+                        pass
+        finally:
+            proxy.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+
 try:
     while True:
         conn, _ = sock.accept()
         try:
-            data = conn.recv(2048).decode('utf-8', errors='ignore').strip()
-            if data.startswith('https://'):
-                port = extract_oauth_port(data)
-                if port:
-                    start_oauth_proxy(port)
-                subprocess.Popen(['xdg-open', data],
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-        finally:
-            conn.close()
+            # Read URL sent by the container browser wrapper (max 2048 bytes).
+            data = b''
+            while len(data) < 2048:
+                chunk = conn.recv(256)
+                if not chunk or b'\n' in chunk:
+                    data += chunk
+                    break
+                data += chunk
+            url = data.decode('utf-8', errors='ignore').strip()
+
+            if not url.startswith('https://'):
+                conn.close()
+                continue
+
+            port = extract_oauth_port(url)
+            if port:
+                with pending_lock:
+                    pending[port] = conn
+                start_oauth_proxy(port, conn)
+                # conn is kept open — the proxy thread will close it after use.
+            else:
+                conn.close()
+
+            subprocess.Popen(['xdg-open', url],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
 except Exception:
     pass
 finally:

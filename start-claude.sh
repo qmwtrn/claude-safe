@@ -223,18 +223,97 @@ fi
 cd "${CLAUDE_WORKING_DIR:-/workspace}"
 
 # Set up browser opener via Unix socket relay when available.
-# The wrapper sends the URL to the host listener which calls xdg-open there,
-# bypassing AppArmor restrictions on D-Bus access from the container.
+# The wrapper sends the OAuth URL to the host, then holds the connection open.
+# The host starts a TCP proxy for the OAuth callback, opens the browser, and
+# when Firefox delivers the callback the host sends the request path back here.
+# The container makes the final GET to its own 127.0.0.1:<port> and returns
+# the HTTP response to the host, which forwards it to Firefox.
+# This avoids docker exec and requires no docker group membership on the host.
 if [ -n "${CLAUDE_BROWSER_SOCKET:-}" ] && [ -S "${CLAUDE_BROWSER_SOCKET}" ]; then
     cat > /tmp/browser-open.sh << 'BROWSER_WRAPPER_EOF'
 #!/bin/sh
-python3 -c "
-import socket, sys
+python3 - "$1" << 'PYEOF'
+import socket, sys, os, re, urllib.request, urllib.parse, urllib.error, http.client
+
+url = sys.argv[1]
+# Read socket path from environment — not from the heredoc literal, since the
+# outer heredoc is single-quoted and $CLAUDE_BROWSER_SOCKET is not expanded.
+sock_path = os.environ.get('CLAUDE_BROWSER_SOCKET', '')
+if not sock_path:
+    sys.exit(1)
+
+def extract_port(u):
+    try:
+        p = urllib.parse.urlparse(u)
+        qs = urllib.parse.parse_qs(p.query)
+        for ruri in qs.get('redirect_uri', []):
+            rp = urllib.parse.urlparse(ruri)
+            if rp.scheme == 'http' and rp.hostname == 'localhost' and rp.port:
+                return rp.port
+    except Exception:
+        pass
+    return None
+
+port = extract_port(url)
+
 s = socket.socket(socket.AF_UNIX)
-s.connect('$CLAUDE_BROWSER_SOCKET')
-s.sendall(sys.argv[1].encode())
+s.connect(sock_path)
+# Send URL terminated by newline so host knows when to stop reading.
+s.sendall((url + '\n').encode())
+
+if not port:
+    s.close()
+    sys.exit(0)
+
+# Wait for the host to send back the callback path (e.g. /callback?code=...).
+s.settimeout(300)
+path_data = b''
+while b'\n' not in path_data and len(path_data) < 4096:
+    chunk = s.recv(256)
+    if not chunk:
+        break
+    path_data += chunk
+
+callback_path = path_data.decode('utf-8', errors='ignore').strip()
+# Only relay /callback paths and bare /
+if not callback_path or not re.match(r'^(/callback(\?|$)|/$)', callback_path):
+    s.close()
+    sys.exit(0)
+
+# Make the request to the container's own loopback OAuth server.
+# Use a no-redirect handler so we capture the raw response (including 302)
+# and forward it to the host — Firefox handles redirect following itself.
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(NoRedirect)
+try:
+    resp = opener.open(
+        f'http://127.0.0.1:{port}{callback_path}',
+        timeout=15
+    )
+    status = resp.status
+    headers = resp.headers
+    body = resp.read()
+except urllib.error.HTTPError as e:
+    # HTTPError is raised for 3xx when NoRedirect returns None — capture it.
+    status = e.code
+    headers = e.headers
+    body = e.read()
+except Exception as e:
+    s.sendall(f'HTTP/1.0 502 Bad Gateway\r\n\r\n{e}'.encode())
+    s.close()
+    sys.exit(1)
+
+raw = f'HTTP/1.0 {status} OK\r\n'.encode()
+for k, v in headers.items():
+    if k.lower() not in ('transfer-encoding', 'connection'):
+        raw += f'{k}: {v}\r\n'.encode()
+raw += b'\r\n' + body
+s.sendall(raw)
 s.close()
-" "$1"
+PYEOF
 BROWSER_WRAPPER_EOF
     chmod 0700 /tmp/browser-open.sh
     export BROWSER=/tmp/browser-open.sh
