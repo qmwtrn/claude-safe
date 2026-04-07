@@ -85,6 +85,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
 
 # Set up non-root user
 USER node
+ENV HOME=/home/node
 
 # Install global packages
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
@@ -116,7 +117,7 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Install get-shit-done framework for structured development workflows
 RUN npx --yes get-shit-done-cc --global && \
-    test -d /home/node/.claude/commands/gsd || (echo "GSD installation failed" && exit 1)
+    test -f /home/node/.claude/get-shit-done/VERSION || (echo "GSD installation failed" && exit 1)
 
 # Install pre-commit using pipx
 RUN pipx install pre-commit

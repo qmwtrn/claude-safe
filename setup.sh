@@ -32,6 +32,20 @@ fi
 
 echo "✅ Docker found"
 echo "✅ Docker Compose found"
+
+# Check docker socket access before attempting the build
+if ! docker info > /dev/null 2>&1; then
+    echo ""
+    echo "Error: cannot connect to the Docker daemon."
+    echo "   Your user is not in the docker group. Fix with:"
+    echo ""
+    echo "     sudo usermod -aG docker \$USER"
+    echo "     newgrp docker"
+    echo ""
+    echo "   Or log out and back in for the group change to take effect."
+    exit 1
+fi
+
 echo ""
 
 # Create .env file if it doesn't exist
