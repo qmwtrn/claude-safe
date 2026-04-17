@@ -115,6 +115,34 @@ sync_host_claude_auth() {
     install -m 600 "$source_credentials" "$target_claude/.credentials.json"
 }
 
+sync_host_claude_settings() {
+    local host_claude="/host-claude"
+    local source_settings="$host_claude/settings.json"
+    local target_claude="/home/node/.claude"
+
+    if [ ! -f "$source_settings" ]; then
+        return
+    fi
+
+    mkdir -p "$target_claude"
+    install -m 644 "$source_settings" "$target_claude/settings.json"
+}
+
+ensure_superpowers_plugin() {
+    local settings="/home/node/.claude/settings.json"
+
+    mkdir -p "/home/node/.claude"
+
+    if [ ! -f "$settings" ]; then
+        echo '{"enabledPlugins":{"superpowers@claude-plugins-official":true}}' > "$settings"
+        return
+    fi
+
+    local updated
+    updated=$(jq '.enabledPlugins["superpowers@claude-plugins-official"] = true' "$settings")
+    echo "$updated" > "$settings"
+}
+
 extract_worktree_name() {
     local gitdir_path="$1"
     local normalized_path="${gitdir_path//\\//}"
@@ -144,6 +172,8 @@ sync_host_ssh
 sync_host_claude_auth
 sync_host_gitconfig
 setup_git_credentials
+sync_host_claude_settings
+ensure_superpowers_plugin
 
 # Fix git worktree paths when running inside Docker
 # Git worktrees use a .git file (not directory) containing a gitdir pointer to
