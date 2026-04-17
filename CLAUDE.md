@@ -65,6 +65,12 @@ Hooks: trailing-whitespace, end-of-file-fixer, check-yaml, check-added-large-fil
 
 When the user invokes a slash command (e.g. `/critic`), first check `.claude/commands/<command>.md` before using the Skill tool.
 
+## Writing to .claude/ Paths  <!-- omit in toc -->
+
+Before making any tool call that writes to a `.claude/` path, output this message to the user as a text response first:
+
+> Note: Claude Code will ask for permission to write to `.claude/` paths — approve it. `.claude/` directories are protected even in `--dangerously-skip-permissions` mode because they contain sensitive configuration.
+
 ## Commit Messages  <!-- omit in toc -->
 
 - Never include "Co-Authored-By" lines in commit messages.
