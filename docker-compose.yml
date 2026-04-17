@@ -14,6 +14,7 @@ services:
       - NET_RAW
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GH_TOKEN=${GH_TOKEN:-}
       - NODE_OPTIONS=--max-old-space-size=4096
       - CLAUDE_CONFIG_DIR=/home/node/.claude
       - POWERLEVEL9K_DISABLE_GITSTATUS=true
@@ -25,9 +26,10 @@ services:
       - ${PROJECT_DIR:-.}:/workspace
       # For git worktrees: mount the parent repo (defaults to PROJECT_DIR when not set)
       - ${GIT_PARENT_REPO:-${PROJECT_DIR:-.}}:/git-parent-repo
-      # Import SSH keys and Claude auth from host without masking image content
+      # Import SSH keys, Claude auth, and git config from host without masking image content
       - ~/.ssh:/host-ssh:ro
       - ~/.claude:/host-claude:ro
+      - ~/.gitconfig:/host-gitconfig:ro
       # Persistent volumes for history and Claude config
       - claude-code-bashhistory:/commandhistory
       - claude-code-config:/home/node/.claude
@@ -45,3 +47,10 @@ services:
 volumes:
   claude-code-bashhistory:
   claude-code-config:
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

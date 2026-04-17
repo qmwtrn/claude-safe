@@ -32,6 +32,20 @@ fi
 
 echo "✅ Docker found"
 echo "✅ Docker Compose found"
+
+# Check docker socket access before attempting the build
+if ! docker info > /dev/null 2>&1; then
+    echo ""
+    echo "Error: cannot connect to the Docker daemon."
+    echo "   Your user is not in the docker group. Fix with:"
+    echo ""
+    echo "     sudo usermod -aG docker \$USER"
+    echo "     newgrp docker"
+    echo ""
+    echo "   Or log out and back in for the group change to take effect."
+    exit 1
+fi
+
 echo ""
 
 # Create .env file if it doesn't exist
@@ -59,6 +73,9 @@ if [ "${1:-}" = "--force" ] || [ "${1:-}" = "--no-cache" ]; then
     echo ""
 fi
 
+export PROJECT_DIR="${PROJECT_DIR:-.}"
+export GIT_PARENT_REPO="${GIT_PARENT_REPO:-${PROJECT_DIR}}"
+
 if "${COMPOSE_CMD[@]}" build $FORCE_REBUILD; then
     echo ""
     echo "======================================"
@@ -75,14 +92,27 @@ if "${COMPOSE_CMD[@]}" build $FORCE_REBUILD; then
     echo ""
     echo "Claude Code will start automatically with --dangerously-skip-permissions"
     echo ""
-    echo "💡 Tip: Create an alias for easier access:"
-    echo ""
-    echo "  echo \"alias claude='$(pwd)/claude-safe.sh'\" >> ~/.bashrc"
-    echo "  source ~/.bashrc"
-    echo ""
-    echo "Then just run 'claude' from any project directory!"
-    echo ""
     echo "For more info, see README.md"
+    echo ""
+    echo "To add persistent environment variables without modifying tracked files:"
+    echo ""
+    echo "  1. Add values to .env (gitignored):"
+    echo "       MY_VAR=my_value"
+    echo "       AZURE_FEED_PAT=your-pat-here"
+    echo ""
+    echo "  2. Reference them in docker-compose.override.yml (gitignored):"
+    echo "       services:"
+    echo "         claude-code:"
+    echo "           environment:"
+    echo "             - MY_VAR=\${MY_VAR:-}"
+    echo "             - AZURE_FEED_PAT=\${AZURE_FEED_PAT:-}"
+    echo ""
+    echo "  See README.md for Azure DevOps HTTPS authentication setup."
+    echo ""
+    echo "Optional -- add an alias to ~/.bashrc:"
+    echo ""
+    echo "  echo \"alias claude-safe='$(pwd)/claude-safe.sh'\" >> ~/.bashrc"
+    echo "  source ~/.bashrc"
     echo ""
 else
     echo ""
