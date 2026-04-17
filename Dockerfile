@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   xclip \
   xsel \
   xdg-utils \
+  chromium \
   expect \
   python3-pip \
   pipx \
@@ -83,6 +84,10 @@ RUN ARCH=$(dpkg --print-architecture) && \
   wget "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${ARCH}" -O /usr/local/bin/yq && \
   chmod +x /usr/local/bin/yq
 
+# Puppeteer: use system Chromium, skip bundled chrome-headless-shell download
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
 # Set up non-root user
 USER node
 ENV HOME=/home/node
@@ -115,6 +120,9 @@ RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/
 # Install Claude
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# Install mermaid-cli (uses system Chromium via PUPPETEER_EXECUTABLE_PATH)
+RUN npm install -g @mermaid-js/mermaid-cli
+
 # Install get-shit-done framework for structured development workflows
 RUN npx --yes get-shit-done-cc --global && \
     test -f /home/node/.claude/get-shit-done/VERSION || (echo "GSD installation failed" && exit 1)
@@ -131,6 +139,17 @@ RUN ssh-keyscan -t rsa github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || tru
     ssh-keyscan -t rsa ssh.dev.azure.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true && \
     ssh-keyscan -t rsa gitlab.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true && \
     ssh-keyscan -t rsa bitbucket.org >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
+
+# Mermaid: puppeteer no-sandbox config (required in container without user namespaces)
+RUN mkdir -p /home/node/.config && \
+  printf '{"args":["--no-sandbox","--disable-dev-shm-usage"]}\n' \
+    > /home/node/.config/mermaid-puppeteer.json && \
+  chown -R node:node /home/node/.config
+
+# mmdc wrapper: transparently injects the puppeteer config so callers need no flags
+RUN printf '#!/bin/sh\nexec /usr/local/share/npm-global/bin/mmdc -p /home/node/.config/mermaid-puppeteer.json "$@"\n' \
+    > /usr/local/bin/mmdc && \
+  chmod +x /usr/local/bin/mmdc
 
 COPY setup-clipboard.sh /usr/local/bin/
 COPY init-firewall.sh /usr/local/bin/
