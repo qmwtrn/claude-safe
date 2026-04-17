@@ -14,6 +14,7 @@ services:
       - NET_RAW
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GH_TOKEN=${GH_TOKEN:-}
       - NODE_OPTIONS=--max-old-space-size=4096
       - CLAUDE_CONFIG_DIR=/home/node/.claude
       - POWERLEVEL9K_DISABLE_GITSTATUS=true
